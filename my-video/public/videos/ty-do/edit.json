@@ -2,7 +2,8 @@
   "notes": [
     "4.1 Tỷ Đô - Con Số Người Úc Không Ngờ Tới: the approved TyDoReel v7 edit, expressed as template data.",
     "remove[0] = the $1M example (misspoken figure '1.600'), cut at Daniel's request; remove[1] = 'Họ có,' false start before 'các ngân hàng có thể…'.",
-    "exemptions: the kinetic cue strikes out 'Lãi suất rẻ nhất' as the thing NOT to chase, a negation."
+    "exemptions: the kinetic cue strikes out 'Lãi suất rẻ nhất' as the thing NOT to chase, a negation.",
+    "cut.stutters off: the approved edit keeps 'món món' (127240) in the audio; cutting it would also re-pace the next 47 s."
   ],
   "title": "4,1 Tỷ Đô - Con Số Người Úc Không Ngờ Tới",
   "coverFrameMs": 5600,
@@ -17,6 +18,7 @@
     [93740, 108700],
     [188480, 188960]
   ],
+  "cut": { "stutters": false },
   "chapters": [
     { "atMs": 20560, "title": "Chi phí thật sự", "effect": "slide" },
     { "atMs": 45480, "title": "Ví dụ thực tế", "effect": "wipe" },

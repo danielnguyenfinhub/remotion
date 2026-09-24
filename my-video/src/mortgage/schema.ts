@@ -124,6 +124,24 @@ export const editSchema = z.strictObject({
     })
     .optional(),
   remove: z.array(z.tuple([ms, ms])).optional(),
+  // Automatic cuts, each on unless set to false: hesitation sounds (ờ, ừm, …),
+  // stutters (the first of a word or phrase said twice in a row) and swear
+  // words. `words` adds more words or phrases to always cut. Restarts in
+  // different words still need a `remove` span.
+  cut: z
+    .strictObject({
+      fillers: z.boolean().optional(),
+      stutters: z.boolean().optional(),
+      badWords: z.boolean().optional(),
+      words: z.array(text).optional(),
+    })
+    .optional(),
+  // Background music from public/, e.g. "music/calm-piano.mp3", looped under
+  // the whole video. volume (default 0.3) is its level on the cover, in pauses
+  // and on the end cards; it dips automatically while Daniel talks.
+  music: z
+    .strictObject({ file: text, volume: z.number().min(0).max(1).optional() })
+    .optional(),
   captionFixes: z.array(z.strictObject({ from: text, to: text })).optional(),
   keywords: z.array(text).optional(),
   pacing: z

@@ -9,6 +9,7 @@ import {
   springTiming,
   type TransitionPresentation,
 } from "@remotion/transitions";
+import { Audio } from "@remotion/media";
 import { clockWipe } from "@remotion/transitions/clock-wipe";
 import { fade } from "@remotion/transitions/fade";
 import { flip } from "@remotion/transitions/flip";
@@ -44,15 +45,17 @@ import {
   DEFAULT_SUBTITLE,
   onScreenCopy,
   parseEdit,
+  type EditJson,
   type Reel,
 } from "./schema";
-import { KEYWORDS, retryVideoFetch, useReelFont } from "./style";
+import { KEYWORDS, clamp, retryVideoFetch, useReelFont } from "./style";
 import {
   CHAPTER_TRANSITION_FRAMES,
   COVER_FRAMES,
   COVER_TRANSITION_FRAMES,
   TALK_START_FRAME,
   buildTimeline,
+  type OutCaption,
   type Segment,
   type TransitionKind,
   type Word,
@@ -68,6 +71,15 @@ const COMPLIANCE_FRAMES = 150;
 const COMPLIANCE_TRANSITION = 10;
 const HOOK_FRAMES = 105;
 const DEFAULT_COVER_FRAME_MS = 1500;
+const MUSIC_VOLUME = 0.3;
+// While Daniel talks the music plays at this fraction of its volume.
+const MUSIC_DUCK = 0.3;
+// Pauses shorter than this stay ducked, so the music doesn't pump between words.
+const MUSIC_HOLD_MS = 700;
+// Frames for a full swing between ducked and full, either way.
+const MUSIC_RAMP_FRAMES = 10;
+const MUSIC_FADE_IN_FRAMES = 15;
+const MUSIC_FADE_OUT_FRAMES = 45;
 
 export const mortgageReelSchema = z.object({ slug: z.string() });
 export type MortgageReelProps = z.infer<typeof mortgageReelSchema> & {
@@ -190,6 +202,60 @@ const TalkSegment: React.FC<{ seg: Segment; index: number; src: string }> = ({
   );
 };
 
+// edit.json's music, looped under the whole video and ducked under speech. The
+// captions (talk-timeline ms, kept words only) say when Daniel talks; the level
+// is precomputed per frame and ramps at most one MUSIC_RAMP_FRAMES step a
+// frame, starting to dip before each phrase.
+const Music: React.FC<{
+  music: NonNullable<EditJson["music"]>;
+  captions: OutCaption[];
+}> = ({ music, captions }) => {
+  const { fps, durationInFrames } = useVideoConfig();
+  const levels = React.useMemo(() => {
+    const level = new Array<number>(durationInFrames).fill(1);
+    for (const c of captions) {
+      const from = Math.floor(((c.startMs - MUSIC_HOLD_MS / 2) * fps) / 1000);
+      const to = Math.ceil(((c.endMs + MUSIC_HOLD_MS / 2) * fps) / 1000);
+      for (
+        let f = Math.max(0, TALK_START_FRAME + from);
+        f < Math.min(durationInFrames, TALK_START_FRAME + to);
+        f++
+      )
+        level[f] = MUSIC_DUCK;
+    }
+    const step = (1 - MUSIC_DUCK) / MUSIC_RAMP_FRAMES;
+    for (let f = 1; f < level.length; f++)
+      level[f] = Math.min(level[f], level[f - 1] + step);
+    for (let f = level.length - 2; f >= 0; f--)
+      level[f] = Math.min(level[f], level[f + 1] + step);
+    return level;
+  }, [captions, fps, durationInFrames]);
+  const volume = music.volume ?? MUSIC_VOLUME;
+  return (
+    <Audio
+      src={staticFile(music.file)}
+      loop
+      // The volume curve follows the video, not each pass through the track.
+      loopVolumeCurveBehavior="extend"
+      volume={(f) =>
+        volume *
+        (levels[f] ?? 1) *
+        interpolate(
+          f,
+          [
+            0,
+            MUSIC_FADE_IN_FRAMES,
+            durationInFrames - MUSIC_FADE_OUT_FRAMES,
+            durationInFrames,
+          ],
+          [0, 1, 1, 0],
+          clamp,
+        )
+      }
+    />
+  );
+};
+
 export const MortgageReel: React.FC<MortgageReelProps> = ({ slug, reel }) => {
   useReelFont();
   if (!reel) throw new Error("MortgageReel: calculateMetadata did not run.");
@@ -248,6 +314,9 @@ export const MortgageReel: React.FC<MortgageReelProps> = ({ slug, reel }) => {
           <ComplianceCard compliance={edit.compliance} />
         </TransitionSeries.Sequence>
       </TransitionSeries>
+      {edit.music ? (
+        <Music music={edit.music} captions={timeline.captions} />
+      ) : null}
 
       <Sequence
         from={TALK_START_FRAME}

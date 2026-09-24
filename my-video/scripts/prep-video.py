@@ -1,13 +1,16 @@
 """Prepare a new talking-head video for the MortgageReel template.
 
-    python scripts/prep-video.py "<path to the recorded video>" <slug>
+    python scripts/prep-video.py "<path to the recorded video>" <slug> [--no-clean]
 
 1. public/videos/<slug>/source.mp4: a short-GOP proxy (a keyframe every 15
    frames) so every OffthreadVideo seek is cheap; phone originals often have one
    keyframe every 8 s, which times out parallel renders. Checked frame-for-frame
-   against the original, so transcript timestamps apply to both.
+   against the original, so transcript timestamps apply to both. Its audio gets
+   the VOICE_CLEANUP chain below unless --no-clean (for an already clean
+   studio recording).
 2. public/videos/<slug>/words.json: word-level faster-whisper large-v3
-   transcript (Vietnamese) of the proxy. Slow on CPU; progress is printed.
+   transcript (Vietnamese) of the proxy, hesitation sounds (ờ, ừm) included so
+   the timeline can cut them. Slow on CPU; progress is printed.
 3. A sentence table with each sentence's pace (words/s), flagging slow and fast
    delivery, to help write edit.json.
 4. public/videos/<slug>/edit.json: a skeleton (title from the file name), only
@@ -30,6 +33,15 @@ FAST_WPS = 5.4
 # A table row ends at a full stop, a pause, or this many words.
 ROW_PAUSE_MS = 400
 ROW_MAX_WORDS = 20
+# Cut rumble below 80 Hz, take 10 dB off steady background noise (air-con,
+# hiss), even out soft and loud words, then set the voice to -16 LUFS so every
+# video starts from the same level. Timing is untouched.
+VOICE_CLEANUP = ("highpass=f=80,afftdn=nr=10:nf=-50:tn=1,"
+                 "acompressor=threshold=-20dB:ratio=3:attack=5:release=150,"
+                 "loudnorm=I=-16:TP=-1.5:LRA=11")
+# Whisper leaves hesitation sounds out unless its prompt has some; once they are
+# in words.json, the timeline cuts them (edit.json "cut").
+FILLER_PROMPT = "Ừm, ờ... hôm nay thì, à, mình nói về, ờm, khoản vay nhé."
 
 
 def run(cmd: list[str], what: str) -> str:
@@ -58,12 +70,14 @@ def frame_count(path: Path) -> int:
     return int(out)
 
 
-def make_proxy(src: Path, proxy: Path) -> None:
-    print(f"Encoding proxy -> {proxy} ...", flush=True)
+def make_proxy(src: Path, proxy: Path, clean: bool) -> None:
+    print(f"Encoding proxy -> {proxy} "
+          f"({'voice clean-up' if clean else 'audio as recorded'}) ...", flush=True)
     run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(src),
          "-c:v", "libx264", "-crf", "16", "-preset", "medium",
          "-g", "15", "-keyint_min", "15", "-sc_threshold", "0",
-         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+         "-pix_fmt", "yuv420p", *(["-af", VOICE_CLEANUP] if clean else []),
+         "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
          "-movflags", "+faststart", str(proxy)], "proxy encode")
     original, copy = frame_count(src), frame_count(proxy)
     if original != copy:
@@ -82,7 +96,8 @@ def transcribe(proxy: Path) -> list[dict]:
     print("Loading faster-whisper large-v3 (CPU, int8) ...", flush=True)
     model = WhisperModel("large-v3", device="cpu", compute_type="int8", cpu_threads=16)
     segments, info = model.transcribe(str(proxy), language="vi",
-                                      word_timestamps=True, beam_size=5)
+                                      word_timestamps=True, beam_size=5,
+                                      initial_prompt=FILLER_PROMPT)
     started = time.time()
     words: list[dict] = []
     for seg in segments:
@@ -131,6 +146,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("video", type=Path, help="the recorded video file")
     parser.add_argument("slug", help="short folder name, e.g. lmi-explained")
+    parser.add_argument("--no-clean", action="store_true",
+                        help="keep the audio as recorded (skip the voice clean-up)")
     args = parser.parse_args()
     src: Path = args.video.resolve()
     slug: str = args.slug
@@ -142,7 +159,7 @@ def main() -> None:
     folder = ROOT / "public" / "videos" / slug
     folder.mkdir(parents=True, exist_ok=True)
     proxy = folder / "source.mp4"
-    make_proxy(src, proxy)
+    make_proxy(src, proxy, clean=not args.no_clean)
 
     words = transcribe(proxy)
     words_path = folder / "words.json"
