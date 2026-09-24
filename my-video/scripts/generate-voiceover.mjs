@@ -38,9 +38,13 @@ if (!apiKey) {
   process.exit(1);
 }
 
-// Rachel, one of ElevenLabs' default voices. Swap for any voice ID from
-// https://api.elevenlabs.io/v1/voices (or the ElevenLabs dashboard).
+// Rachel, one of ElevenLabs' default voices, which is English. For Vietnamese,
+// pick a Vietnamese voice in ElevenLabs' Voice Library and set its ID here or
+// per scene (`voiceId`).
 const DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM";
+// Eleven v3 speaks Vietnamese; eleven_multilingual_v2 (the API's default)
+// doesn't. eleven_flash_v2_5 also does, faster and cheaper.
+const MODEL_ID = "eleven_v3";
 
 const SCENES = [
   {id: "scene-01-intro", text: "Welcome to the show."},
@@ -62,7 +66,7 @@ for (const scene of SCENES) {
       },
       body: JSON.stringify({
         text: scene.text,
-        model_id: "eleven_multilingual_v2",
+        model_id: MODEL_ID,
       }),
     },
   );

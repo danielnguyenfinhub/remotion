@@ -1,6 +1,7 @@
 // Edit decision list for a MortgageReel video, built from the word-level
 // faster-whisper transcript (words.json) and the per-video edit.json.
-// Silence gaps are cut, `remove` spans drop false starts, chapters put a real
+// Silence gaps are cut, `remove` spans drop false starts, fillers, stutters and
+// swear words are cut automatically (edit.json `cut`), chapters put a real
 // transition on the nearest cut, and each kept segment gets a playback rate so
 // Daniel's delivery lands near a steady pace. Captions and overlays are remapped
 // from source time to output time through the same segment list.
@@ -27,9 +28,18 @@ export type Pacing = {
   overrides?: { fromMs: number; toMs: number; rate: number }[];
 };
 
+// Automatic cuts; each kind is on unless set to false.
+export type AutoCut = {
+  fillers?: boolean;
+  stutters?: boolean;
+  badWords?: boolean;
+  words?: string[]; // more words or phrases to always cut
+};
+
 // The parts of edit.json the timeline depends on.
 export type TimelineEdit = {
   remove?: [number, number][];
+  cut?: AutoCut;
   captionFixes?: { from: string; to: string }[];
   chapters?: { atMs: number; effect: TransitionKind }[];
   pacing?: Pacing;
@@ -55,10 +65,14 @@ export type OutCaption = {
   confidence: number | null;
 };
 
+// A word the automatic cuts removed, at its source time.
+export type AutoCutWord = { text: string; atMs: number; reason: string };
+
 export type Timeline = {
   segments: Segment[];
   talkFrames: number;
   captions: OutCaption[];
+  autoCuts: AutoCutWord[];
 };
 
 // Silence longer than this (between two words) is cut out.
@@ -85,6 +99,27 @@ const PACE_MIN_WORDS = 5;
 const RATE_STEPS = 20;
 const MAX_NEIGHBOUR_STEPS = 2;
 
+// Automatic cuts. Hesitation sounds, wherever they are: prep-video.py prompts
+// Whisper to write them down, since it leaves most of them out otherwise.
+const FILLERS = [
+  "ờ", "ờm", "ừ", "ừm", "ơ", "hừm", "hmm", "um", "umm", "uh", "uhm", "er", "erm",
+];
+// Verbal tics cut only when they open a sentence (after a full stop or pause).
+const SENTENCE_START_FILLERS = ["thì", "à"];
+// Swear words, wherever they are; a phrase is cut as a whole.
+const BAD_WORDS = [
+  "đm", "đmm", "dm", "dmm", "đcm", "dcm", "đkm", "địt", "đéo", "lồn", "buồi",
+  "cặc", "đĩ", "vãi", "vl", "vcl", "vkl", "clgt", "mẹ kiếp", "chết tiệt",
+  "khốn nạn", "đồ chó", "fuck", "fucking", "fucked", "shit", "bullshit",
+  "damn", "bitch", "crap", "wtf",
+];
+// A stutter is up to this many words said twice in a row; the first go is cut.
+const MAX_STUTTER_WORDS = 3;
+// Words doubled on purpose ("từ từ", "dần dần"), never cut as a stutter.
+const REDUPLICATIONS = [
+  "từ", "dần", "mãi", "ngày", "người", "nhà", "đời", "thường", "đâu", "ai",
+];
+
 // Recognition slips fixed in the captions only (audio is untouched), using the
 // neighbouring words to disambiguate.
 const fixWord = (
@@ -106,7 +141,48 @@ const bare = (s: string | undefined) =>
     .toLowerCase()
     .replace(/[.,!?]/g, "");
 
-type EditWord = Word & { dropped: boolean };
+// Lowercase letters and digits only, for matching words against the lists.
+const key = (s: string) =>
+  s
+    .normalize("NFC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]/gu, "");
+
+// Why each word is cut automatically (null: kept). A listed word or phrase is
+// matched word for word; a stutter is the first of two identical runs. Words
+// in `remove` spans have an empty key, so they never match.
+const autoCutReasons = (keys: string[], cut: AutoCut): (string | null)[] => {
+  const reasons: (string | null)[] = keys.map(() => null);
+  const lists: [string, string[]][] = [
+    ["filler", cut.fillers === false ? [] : FILLERS],
+    ["bad word", cut.badWords === false ? [] : BAD_WORDS],
+    ["cut.words", cut.words ?? []],
+  ];
+  const phrases = lists.flatMap(([reason, list]) =>
+    list.map((p) => ({ reason, words: p.split(/\s+/).map(key).filter(Boolean) })),
+  );
+  const same = (a: number, b: number, n: number) => {
+    for (let j = 0; j < n; j++)
+      if (keys[a + j] === "" || keys[a + j] !== keys[b + j]) return false;
+    return true;
+  };
+  for (let i = 0; i < keys.length; i++) {
+    for (const p of phrases) {
+      if (p.words.length > 0 && p.words.every((k, j) => keys[i + j] === k))
+        for (let j = 0; j < p.words.length; j++) reasons[i + j] ??= p.reason;
+    }
+    if (cut.stutters === false) continue;
+    for (let n = MAX_STUTTER_WORDS; n >= 1; n--) {
+      if (i + 2 * n > keys.length || !same(i, i + n, n)) continue;
+      if (n === 1 && REDUPLICATIONS.includes(keys[i])) break;
+      for (let j = 0; j < n; j++) reasons[i + j] ??= "stutter";
+      break;
+    }
+  }
+  return reasons;
+};
+
+type EditWord = Word & { dropped: boolean; autoCut: string | null };
 
 const prepareWords = (raw: Word[], edit: TimelineEdit): EditWord[] => {
   // Whisper splits "4.1", "100.000", "0.4%" into several tokens; a token with no
@@ -124,30 +200,42 @@ const prepareWords = (raw: Word[], edit: TimelineEdit): EditWord[] => {
   }
   const remove = edit.remove ?? [];
   const fixes = edit.captionFixes ?? [];
-  return merged
-    .filter((w) => w.endMs > w.startMs)
-    .map((w, i, all) => {
-      const prev = all[i - 1];
-      // Sentence-initial "thì" (a verbal tic) after a pause or a full stop.
-      const sentenceStartFiller =
-        bare(w.text) === "thì" &&
-        (!prev ||
-          w.startMs - prev.endMs > MAX_GAP_MS ||
-          /[.?!]$/.test(prev.text.trim()));
-      const fixed = fixWord(
-        w.text.normalize("NFC").trim(),
-        bare(prev?.text),
-        bare(all[i + 1]?.text),
-      );
-      const custom = fixes.find((f) => f.from === fixed);
-      return {
-        ...w,
-        text: ` ${custom ? custom.to : fixed}`,
-        dropped:
-          sentenceStartFiller ||
-          remove.some(([a, b]) => w.startMs >= a && w.endMs <= b),
-      };
-    });
+  const cut = edit.cut ?? {};
+  const timed = merged.filter((w) => w.endMs > w.startMs);
+  const removed = timed.map((w) =>
+    remove.some(([a, b]) => w.startMs >= a && w.endMs <= b),
+  );
+  const reasons = autoCutReasons(
+    timed.map((w, i) => (removed[i] ? "" : key(w.text))),
+    cut,
+  );
+  // A sentence starts after a full stop or a pause, and keeps starting through
+  // cut fillers ("À, thì …").
+  let atSentenceStart = true;
+  return timed.map((w, i, all) => {
+    const prev = all[i - 1];
+    if (prev && w.startMs - prev.endMs > MAX_GAP_MS) atSentenceStart = true;
+    const sentenceStartFiller =
+      cut.fillers !== false &&
+      atSentenceStart &&
+      SENTENCE_START_FILLERS.includes(key(w.text));
+    const autoCut = sentenceStartFiller ? "filler" : reasons[i];
+    atSentenceStart =
+      /[.?!]$/.test(w.text.trim()) ||
+      (atSentenceStart && autoCut === "filler");
+    const fixed = fixWord(
+      w.text.normalize("NFC").trim(),
+      bare(prev?.text),
+      bare(all[i + 1]?.text),
+    );
+    const custom = fixes.find((f) => f.from === fixed);
+    return {
+      ...w,
+      text: ` ${custom ? custom.to : fixed}`,
+      dropped: removed[i] || autoCut !== null,
+      autoCut: removed[i] ? null : autoCut,
+    };
+  });
 };
 
 type Run = {
@@ -327,8 +415,15 @@ export const buildTimeline = (
   const talkFrames = last.outFrom + last.outDuration;
 
   const captions: OutCaption[] = words.flatMap((w, i) => {
-    // A stutter ("món món") stays in the audio but is shown once.
-    if (w.dropped || w.text === words[i - 1]?.text) return [];
+    // With cut.stutters off, a stutter ("món món") stays in the audio but is
+    // shown once. A doubling on purpose ("dần dần") is shown as said.
+    const prev = words[i - 1];
+    const stutter =
+      prev &&
+      !prev.dropped &&
+      w.text === prev.text &&
+      !REDUPLICATIONS.includes(key(w.text));
+    if (w.dropped || stutter) return [];
     const start = toOutMs(segments, w.startMs, fps);
     if (start === null) return [];
     const end =
@@ -344,5 +439,11 @@ export const buildTimeline = (
     ];
   });
 
-  return { segments, talkFrames, captions };
+  const autoCuts = words.flatMap((w) =>
+    w.autoCut
+      ? [{ text: w.text.trim(), atMs: w.startMs, reason: w.autoCut }]
+      : [],
+  );
+
+  return { segments, talkFrames, captions, autoCuts };
 };

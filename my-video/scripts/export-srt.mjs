@@ -1,5 +1,7 @@
 // Writes out/videos/<slug>/<slug>.srt for a MortgageReel video: the same cut,
-// paced captions the render shows, shifted by the cover card.
+// paced captions the render shows, shifted by the cover card, and lists the
+// words edit.json's `cut` removes automatically (quick: run it to check them
+// before rendering).
 //   node scripts/export-srt.mjs <slug>
 // Imports src/mortgage/timeline.ts directly through Node's native type
 // stripping (Node 22.18+/24), so that file must stay import-free.
@@ -29,7 +31,7 @@ const read = (f) => {
 const { buildTimeline, TALK_START_FRAME } = await import(
   pathToFileURL(join(root, "src", "mortgage", "timeline.ts")).href
 );
-const { captions } = buildTimeline(read("words.json"), read("edit.json"), FPS);
+const { captions, autoCuts } = buildTimeline(read("words.json"), read("edit.json"), FPS);
 const offset = (TALK_START_FRAME * 1000) / FPS;
 
 const groups = [];
@@ -59,3 +61,9 @@ mkdirSync(outDir, { recursive: true });
 const out = join(outDir, `${slug}.srt`);
 writeFileSync(out, srt, "utf8");
 console.log(`${out} (${groups.length} cues)`);
+if (autoCuts.length > 0)
+  console.log(
+    `Cut automatically (source time): ${autoCuts
+      .map((c) => `${(c.atMs / 1000).toFixed(1)}s "${c.text}" (${c.reason})`)
+      .join(", ")}`,
+  );

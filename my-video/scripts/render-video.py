@@ -2,9 +2,11 @@
 
     python scripts/render-video.py <slug>
 
-Writes to out/videos/<slug>/: <slug>.mp4 (1080x1920 H.264), <slug>-mobile.mp4
-(720x1280, two-pass x264 sized to about 27 MB), thumbnail.png (the cover card,
-frame 45) and <slug>.srt. Exits non-zero on the first failure.
+Writes to out/videos/<slug>/: <slug>.mp4 (1080x1920 H.264, its final mix of
+voice, music and sound effects set to -14 LUFS, the level YouTube, Facebook
+and TikTok play at), <slug>-mobile.mp4 (720x1280, two-pass x264 sized to about
+27 MB), thumbnail.png (the cover card, frame 45) and <slug>.srt. Exits non-zero
+on the first failure.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ REMOTION = ["node", str(ROOT / "node_modules" / "@remotion" / "cli" / "remotion-
 MOBILE_TARGET_BYTES = 27_000_000
 MOBILE_AUDIO_BPS = 96_000
 THUMBNAIL_FRAME = 45
+LOUDNESS = "I=-14:TP=-1:LRA=11"
 
 
 def run(cmd: list[str], what: str, capture: bool = False) -> str:
@@ -68,6 +71,26 @@ def mean_volume_db(path: Path) -> str:
     return f"{match.group(1)} dB"
 
 
+def normalize_loudness(path: Path) -> None:
+    """Two-pass loudnorm of the audio to LOUDNESS, in place; video is copied."""
+    out = run(
+        ["ffmpeg", "-hide_banner", "-i", str(path), "-map", "0:a:0",
+         "-af", f"loudnorm={LOUDNESS}:print_format=json", "-f", "null", os.devnull],
+        f"measure loudness {path.name}", capture=True,
+    )
+    m = json.loads(out[out.rindex("{"):out.rindex("}") + 1])
+    tmp = path.with_name(f"{path.stem}.loudnorm{path.suffix}")
+    run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(path),
+         "-c:v", "copy", "-af",
+         f"loudnorm={LOUDNESS}:measured_I={m['input_i']}:measured_TP={m['input_tp']}"
+         f":measured_LRA={m['input_lra']}:measured_thresh={m['input_thresh']}"
+         f":offset={m['target_offset']}:linear=true",
+         "-c:a", "aac", "-b:a", "320k", "-ar", "48000", "-movflags", "+faststart",
+         str(tmp)],
+        f"loudness {m['input_i']} LUFS -> -14 LUFS")
+    os.replace(tmp, path)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("slug", help="folder name under public/videos/")
@@ -86,6 +109,7 @@ def main() -> None:
                     f"--props={props}", "--codec=h264", "--gl=angle",
                     "--concurrency=8", "--timeout=120000"],
         f"render {full.name} (several minutes)")
+    normalize_loudness(full)
 
     seconds = duration_s(full)
     video_bps = int(MOBILE_TARGET_BYTES * 8 / seconds) - MOBILE_AUDIO_BPS

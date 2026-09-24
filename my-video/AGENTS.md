@@ -44,7 +44,7 @@ The owner's videos are bilingual. The speech may be Vietnamese, English, or a mi
   - `@remotion/install-whisper-cpp`: `medium`, `large-v3` or `large-v3-turbo`, with `language: "vi"`. `translateToEnglish: true` does the same translation, again not with `large-v3-turbo`. `splitOnWord: true` makes whisper.cpp split its output on words rather than tokens.
   - OpenAI's Whisper API: pass `language: "vi"` for Vietnamese audio.
   - For speech that mixes the two, transcribe with the main language and check the English terms in the result; if they come out wrong, split the audio by language and transcribe each part on its own.
-- **Voiceover:** when generating speech (ElevenLabs or similar), pick a model and voice that list Vietnamese support, and generate the Vietnamese and English lines separately. `scripts/generate-voiceover.mjs` hardcodes `model_id: "eleven_multilingual_v2"`; check ElevenLabs' current language list for that model before using it for Vietnamese, and switch the model if Vietnamese isn't on it.
+- **Voiceover:** when generating speech (ElevenLabs or similar), pick a model and voice that list Vietnamese support, and generate the Vietnamese and English lines separately. `scripts/generate-voiceover.mjs` uses `eleven_v3`, which speaks Vietnamese; `eleven_multilingual_v2` (the API's default) doesn't. Its default voice (Rachel) is English, so give Vietnamese lines a Vietnamese voice from ElevenLabs' Voice Library.
 
 ## Badges and logos: `public/badges/`
 
@@ -100,6 +100,17 @@ Reusable pieces for the owner's real videos; start from these rather than writin
 - `BrandOverlay` / `BrandOverlayVertical` (`name`, `roleVi`, `roleEn`, editable in the Studio's props panel): a transparent overlay for video editors, with the logo on a white pill top-right for the whole 8 s and the lower third from 1 s to 6 s. `npx remotion render BrandOverlay` (or `BrandOverlayVertical` for 1080×1920 reels) writes `out/brand-overlay.mov` as ProRes 4444 with transparency, which Final Cut Pro, Premiere Pro and DaVinci Resolve import; put it on a track above the footage.
 
 If a second video project ever needs these, `remotion-dev/library-starter` is Remotion's template for publishing them as a package; it pins Remotion 4.0.46, so upgrade it first.
+
+## MortgageReel: `src/mortgage/`
+
+The talking-head template. Each video is a folder `public/videos/<slug>/` with `source.mp4` (not in Git), `words.json` and `edit.json`; the code doesn't change per video.
+
+1. `python scripts/prep-video.py "<recording>" <slug>` makes the proxy with the voice cleaned up (`--no-clean` keeps the audio as recorded), the word-level transcript with hesitation sounds written down, and a starter `edit.json`.
+2. Edit `edit.json` (its fields are described in `src/mortgage/schema.ts`) and preview `MortgageReel` in the Studio with `slug` set.
+3. `python scripts/render-video.py <slug>` renders, sets the final mix to -14 LUFS, and writes the mobile copy, thumbnail and `.srt`.
+
+- **Automatic cuts** (`edit.json` `cut`, all on by default): hesitation sounds, stutters (the first of a word or phrase said twice in a row), swear words, and any extra `words`. Restarts in different words still need a `remove` span. `node scripts/export-srt.mjs <slug>` lists every automatic cut; check it before rendering.
+- **Music** (`edit.json` `music`: a file under `public/music/` and an optional `volume`, default 0.3): looped under the whole video and ducked to 30% while Daniel talks. Use only tracks licensed for social media.
 
 ## Project structure
 
